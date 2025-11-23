@@ -1,279 +1,518 @@
-import hashlib
-import json
-import time
-from ecdsa import SigningKey, SECP256k1, VerifyingKey
-import random
-import socket
-import threading
+# toycoin.py
+import hashlib, json, time, threading, socket
+from ecdsa import SigningKey, VerifyingKey, SECP256k1
+import binascii
+from typing import List, Dict, Tuple
 
-# Transaction class
-class Transaction:
-    def __init__(self, sender_pubkey, recipient_pubkey, amount, fee=0, signature=None):
-        self.sender = sender_pubkey  # hex string
-        self.recipient = recipient_pubkey  # hex string
-        self.amount = amount
-        self.fee = fee  # transaction fee
-        self.signature = signature  # hex string
+# ---------------------------
+# Utility: base58check-like
+# ---------------------------
+ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+def sha256(b: bytes) -> bytes:
+    return hashlib.sha256(b).digest()
+
+def base58_encode(b: bytes) -> str:
+    n = int.from_bytes(b, 'big')
+    s = ""
+    while n > 0:
+        n, r = divmod(n, 58)
+        s = ALPHABET[r] + s
+    # leading zeros
+    pad = 0
+    for ch in b:
+        if ch == 0:
+            pad += 1
+        else:
+            break
+    return ALPHABET[0] * pad + s
+
+def base58check_encode(payload: bytes) -> str:
+    checksum = sha256(sha256(payload))[:4]
+    return base58_encode(payload + checksum)
+
+def pubkey_to_address(pubkey_hex: str) -> str:
+    pub_bytes = bytes.fromhex(pubkey_hex)
+    h = hashlib.new('ripemd160', sha256(pub_bytes)).digest()
+    # prefix 0x00 like Bitcoin (simple)
+    return base58check_encode(b'\x00' + h)
+
+# ---------------------------
+# Transaction (UTXO model)
+# ---------------------------
+class TxInput:
+    def __init__(self, txid: str, index: int, signature: str = None, pubkey: str = None):
+        self.txid = txid  # hex string of previous tx hash
+        self.index = index  # index into previous tx outputs
+        self.signature = signature  # signature hex
+        self.pubkey = pubkey  # public key hex (used to identify owner)
 
     def to_dict(self):
         return {
-            'sender': self.sender,
-            'recipient': self.recipient,
-            'amount': self.amount,
-            'fee': self.fee,
+            'txid': self.txid,
+            'index': self.index,
             'signature': self.signature,
+            'pubkey': self.pubkey
         }
 
-    def compute_hash(self):
-        tx_str = json.dumps({
-            'sender': self.sender,
-            'recipient': self.recipient,
+    @staticmethod
+    def from_dict(d):
+        return TxInput(d['txid'], d['index'], d.get('signature'), d.get('pubkey'))
+
+class TxOutput:
+    def __init__(self, amount: int, recipient_address: str):
+        self.amount = amount
+        self.recipient = recipient_address
+
+    def to_dict(self):
+        return {
             'amount': self.amount,
-            'fee': self.fee
-        }, sort_keys=True)
-        return hashlib.sha256(tx_str.encode()).hexdigest()
+            'recipient': self.recipient
+        }
 
-    def sign(self, private_key):
-        sk = SigningKey.from_string(bytes.fromhex(private_key), curve=SECP256k1)
-        h = self.compute_hash()
-        signature = sk.sign(h.encode())
-        self.signature = signature.hex()
+    @staticmethod
+    def from_dict(d):
+        return TxOutput(d['amount'], d['recipient'])
 
-    def verify(self):
-        if self.sender == "0":  # Mining reward (no sender)
-            return True
-        if not self.signature:
+class Transaction:
+    def __init__(self, inputs: List[TxInput], outputs: List[TxOutput], timestamp=None):
+        self.inputs = inputs
+        self.outputs = outputs
+        self.timestamp = timestamp or time.time()
+        self.txid = self.compute_hash()
+
+    def to_dict(self):
+        return {
+            'txid': self.txid,
+            'inputs': [i.to_dict() for i in self.inputs],
+            'outputs': [o.to_dict() for o in self.outputs],
+            'timestamp': self.timestamp
+        }
+
+    @staticmethod
+    def from_dict(d):
+        inputs = [TxInput.from_dict(i) for i in d['inputs']]
+        outputs = [TxOutput.from_dict(o) for o in d['outputs']]
+        tx = Transaction(inputs, outputs, timestamp=d.get('timestamp'))
+        tx.txid = d.get('txid') or tx.compute_hash()
+        return tx
+
+    def compute_hash(self) -> str:
+        # canonical serialization excluding signatures (for signing)
+        data = {
+            'inputs': [{'txid': i.txid, 'index': i.index, 'pubkey': i.pubkey} for i in self.inputs],
+            'outputs': [o.to_dict() for o in self.outputs],
+            'timestamp': self.timestamp
+        }
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+    def sign_input(self, input_index: int, private_key_hex: str):
+        sk = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
+        h = self.compute_hash().encode()
+        signature = sk.sign(h).hex()
+        self.inputs[input_index].signature = signature
+        # include pubkey so others can verify
+        self.inputs[input_index].pubkey = sk.get_verifying_key().to_string().hex()
+        self.txid = self.compute_hash()
+
+    def verify_input(self, input_index: int, utxo_set) -> bool:
+        inp = self.inputs[input_index]
+        key_hex = inp.pubkey
+        if not key_hex or not inp.signature:
             return False
-        vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
+        # check that referenced UTXO exists and owned by this pubkey
+        referenced = utxo_set.get_utxo(inp.txid, inp.index)
+        if referenced is None:
+            return False
+        # check recipient of referenced UTXO corresponds to this pubkey's address
+        addr = pubkey_to_address(key_hex)
+        if referenced.recipient != addr:
+            return False
+        vk = VerifyingKey.from_string(bytes.fromhex(key_hex), curve=SECP256k1)
         try:
-            return vk.verify(bytes.fromhex(self.signature), self.compute_hash().encode())
+            return vk.verify(bytes.fromhex(inp.signature), self.compute_hash().encode())
         except:
             return False
 
-# Block class
+    def verify(self, utxo_set) -> bool:
+        # verify all inputs
+        for idx, inp in enumerate(self.inputs):
+            if inp.txid == "COINBASE":  # special coinbase input
+                continue
+            if not self.verify_input(idx, utxo_set):
+                return False
+        # check sum(inputs) >= sum(outputs)
+        total_in = 0
+        for inp in self.inputs:
+            if inp.txid == "COINBASE":
+                total_in += 0
+                continue
+            out = utxo_set.get_utxo(inp.txid, inp.index)
+            if out is None:
+                return False
+            total_in += out.amount
+        total_out = sum(o.amount for o in self.outputs)
+        return total_in >= total_out
+
+# ---------------------------
+# UTXO Set
+# ---------------------------
+class UTXOSet:
+    def __init__(self):
+        # map (txid, index) -> TxOutput
+        self.utxos: Dict[Tuple[str, int], TxOutput] = {}
+
+    def add_utxo(self, txid: str, index: int, txout: TxOutput):
+        self.utxos[(txid, index)] = txout
+
+    def remove_utxo(self, txid: str, index: int):
+        if (txid, index) in self.utxos:
+            del self.utxos[(txid, index)]
+
+    def get_utxo(self, txid: str, index: int):
+        return self.utxos.get((txid, index))
+
+    def apply_transaction(self, tx: Transaction):
+        # remove inputs
+        for inp in tx.inputs:
+            if inp.txid == "COINBASE":
+                continue
+            self.remove_utxo(inp.txid, inp.index)
+        # add outputs
+        for i, out in enumerate(tx.outputs):
+            self.add_utxo(tx.txid, i, out)
+
+    def snapshot(self):
+        # return a copy for validation attempts
+        new = UTXOSet()
+        new.utxos = dict(self.utxos)
+        return new
+
+# ---------------------------
+# Block
+# ---------------------------
 class Block:
-    def __init__(self, index, timestamp, transactions, previous_hash='', difficulty=5):
+    def __init__(self, index: int, prev_hash: str, transactions: List[Transaction], difficulty=3, timestamp=None, nonce=0):
         self.index = index
-        self.timestamp = timestamp
-        self.transactions = transactions  # list of Transaction objects
-        self.previous_hash = previous_hash
-        self.nonce = 0
+        self.previous_hash = prev_hash
+        self.transactions = transactions
+        self.timestamp = timestamp or time.time()
+        self.nonce = nonce
         self.difficulty = difficulty
         self.hash = self.compute_hash()
 
-    def compute_hash(self):
+    def compute_hash(self) -> str:
         block_data = {
             'index': self.index,
-            'timestamp': self.timestamp,
-            'transactions': [tx.to_dict() for tx in self.transactions],
             'previous_hash': self.previous_hash,
-            'nonce': self.nonce,
+            'transactions': [tx.to_dict() for tx in self.transactions],
+            'timestamp': self.timestamp,
+            'nonce': self.nonce
         }
-        block_string = json.dumps(block_data, sort_keys=True).encode()
-        return hashlib.sha256(block_string).hexdigest()
+        return hashlib.sha256(json.dumps(block_data, sort_keys=True).encode()).hexdigest()
 
     def mine(self):
         prefix = '0' * self.difficulty
         while not self.hash.startswith(prefix):
             self.nonce += 1
             self.hash = self.compute_hash()
-        print(f"Block {self.index} mined: {self.hash} (nonce: {self.nonce})")
+        print(f"Mined block {self.index} {self.hash} nonce={self.nonce}")
 
-# Blockchain class
+    def to_dict(self):
+        return {
+            'index': self.index,
+            'previous_hash': self.previous_hash,
+            'transactions': [tx.to_dict() for tx in self.transactions],
+            'timestamp': self.timestamp,
+            'nonce': self.nonce,
+            'difficulty': self.difficulty,
+            'hash': self.hash
+        }
+
+    @staticmethod
+    def from_dict(d):
+        txs = [Transaction.from_dict(t) for t in d['transactions']]
+        blk = Block(d['index'], d['previous_hash'], txs, difficulty=d.get('difficulty',3), timestamp=d.get('timestamp'), nonce=d.get('nonce',0))
+        blk.hash = d.get('hash') or blk.compute_hash()
+        return blk
+
+# ---------------------------
+# Mempool
+# ---------------------------
+class Mempool:
+    def __init__(self):
+        # txid -> tx
+        self.txs: Dict[str, Transaction] = {}
+        # track UTXOs reserved by mempool to avoid double spend
+        self.reserved_utxos: Dict[Tuple[str,int], str] = {}
+
+    def add_tx(self, tx: Transaction, utxo_set: UTXOSet):
+        # Basic validation: inputs exist, not reserved, and signatures valid
+        for idx, inp in enumerate(tx.inputs):
+            if inp.txid == "COINBASE":
+                # coinbase only allowed in blocks
+                raise Exception("Coinbase tx cannot be in mempool")
+            k = (inp.txid, inp.index)
+            if utxo_set.get_utxo(*k) is None:
+                raise Exception("Referenced UTXO does not exist")
+            if k in self.reserved_utxos:
+                raise Exception("Referenced UTXO already reserved by mempool")
+            # signature check (uses utxo_set)
+            if not tx.verify_input(idx, utxo_set):
+                raise Exception("Invalid signature for input")
+        # mark utxos reserved
+        for inp in tx.inputs:
+            self.reserved_utxos[(inp.txid, inp.index)] = tx.txid
+        self.txs[tx.txid] = tx
+
+    def remove_tx(self, txid: str):
+        tx = self.txs.pop(txid, None)
+        if not tx:
+            return
+        for inp in tx.inputs:
+            if (inp.txid, inp.index) in self.reserved_utxos:
+                del self.reserved_utxos[(inp.txid, inp.index)]
+
+    def get_all(self):
+        return list(self.txs.values())
+
+# ---------------------------
+# Blockchain (with UTXO, mempool, reorg)
+# ---------------------------
 class Blockchain:
-    def __init__(self, difficulty=5, mining_reward=1, max_supply=10000000):
-        self.chain = []
+    def __init__(self, difficulty=3, mining_reward=50, max_supply=21000000):
+        self.chain: List[Block] = []
         self.difficulty = difficulty
         self.mining_reward = mining_reward
         self.max_supply = max_supply
         self.total_supply = 0
-        self.pending_transactions = []
+        self.utxos = UTXOSet()
+        self.mempool = Mempool()
         self.peers = []
-        self.block_time = 10  # target 5 secs per block
         self.create_genesis_block()
 
-    # New method to adjust difficulty dynamically
-    def adjust_difficulty(self, window=100, dampening=0.25, max_change=1.25):
-        if len(self.chain) <= window:
-            return  # Not enough blocks yet
-
-        latest_block = self.chain[-1]
-        past_block = self.chain[-window - 1]
-
-        actual_time = latest_block.timestamp - past_block.timestamp
-        expected_time = self.block_time * window
-
-        ratio = actual_time / expected_time
-
-        # Apply dampening so we don't overreact
-        adjustment_factor = ratio ** (-dampening)
-
-        # Cap adjustment to avoid big swings
-        adjustment_factor = max(1 / max_change, min(max_change, adjustment_factor))
-
-        # Update difficulty smoothly
-        new_difficulty = self.difficulty * adjustment_factor
-        self.difficulty = max(1, int(new_difficulty))
-
-        print(f"Difficulty adjusted to {self.difficulty:.2f}")
-
     def create_genesis_block(self):
-        genesis_block = Block(0, time.time(), [], "0", self.difficulty)
-        genesis_block.mine()
-        self.chain.append(genesis_block)
-        self.total_supply = self.mining_reward  # Initial supply after mining genesis block
+        # Create a coinbase tx that issues some initial coins to a genesis address
+        # Note: simplified coinbase uses txid "COINBASE"
+        genesis_out = TxOutput(self.mining_reward, "GENESIS")
+        coinbase = Transaction([TxInput("COINBASE", 0)], [genesis_out])
+        coinbase.txid = "GENESIS_TX"
+        blk = Block(0, "0", [coinbase], difficulty=self.difficulty)
+        blk.mine()
+        self.chain.append(blk)
+        # update UTXO with the genesis output
+        self.utxos.add_utxo(coinbase.txid, 0, genesis_out)
+        self.total_supply = self.mining_reward
 
     def get_last_block(self):
         return self.chain[-1]
 
-    def mine_pending_transactions(self, miner_pubkey):
-        if self.total_supply >= self.max_supply:
-            print("Max supply reached! No more coins can be mined.")
-            return
+    def add_peer(self, peer_info):
+        self.peers.append(peer_info)
 
-        # Add mining reward tx
-        reward_tx = Transaction("0", miner_pubkey, self.mining_reward)
-        self.pending_transactions.append(reward_tx)
-
-        # Add transaction fees as part of miner's reward
-        total_fees = sum(tx.fee for tx in self.pending_transactions)
-        reward_tx = Transaction("0", miner_pubkey, total_fees, fee=0)
-        self.pending_transactions.append(reward_tx)
-
-        block = Block(
-            index=self.get_last_block().index + 1,
-            timestamp=time.time(),
-            transactions=self.pending_transactions,
-            previous_hash=self.get_last_block().hash,
-            difficulty=self.difficulty  # Use current difficulty here
-        )
-        block.mine()
-        self.chain.append(block)
-        self.pending_transactions = []
-
-        # Update total supply after mining a block
-        self.total_supply += self.mining_reward + total_fees
-        if self.total_supply > self.max_supply:
-            print("Warning: Total supply exceeded max supply! Something went wrong.")
-            self.total_supply = self.max_supply
-
-        print(f"Mining completed, new block added. Total supply: {self.total_supply}")
-
-        # Adjust difficulty after adding the new block
-        self.adjust_difficulty()
-
-    def get_balance(self, pubkey):
-        balance = 0
-        for block in self.chain:
-            for tx in block.transactions:
-                if tx.sender == pubkey:
-                    balance -= (tx.amount + tx.fee)
-                if tx.recipient == pubkey:
-                    balance += tx.amount
-        # Pending tx
-        for tx in self.pending_transactions:
-            if tx.sender == pubkey:
-                balance -= (tx.amount + tx.fee)
-        return balance
-
-    def add_transaction(self, transaction):
-        if not transaction.sender or not transaction.recipient:
-            raise Exception("Transaction must include sender and recipient")
-        if not transaction.verify():
-            raise Exception("Invalid transaction signature")
-        if self.get_balance(transaction.sender) < (transaction.amount + transaction.fee):
-            raise Exception("Not enough balance")
-        self.pending_transactions.append(transaction)
-
-    def is_chain_valid(self):
-        for i in range(1, len(self.chain)):
-            current = self.chain[i]
-            prev = self.chain[i-1]
-
-            if current.hash != current.compute_hash():
+    def validate_block(self, block: Block, utxo_snapshot: UTXOSet = None) -> bool:
+        # validate proof-of-work
+        if not block.hash.startswith('0' * block.difficulty):
+            return False
+        # validate previous hash
+        if block.index == 0:
+            return True
+        prev = self.get_last_block()
+        if block.previous_hash != prev.hash:
+            # block doesn't attach to current tail; caller may handle reorg
+            pass
+        # validate transactions against a snapshot to avoid mutating main UTXO set during check
+        utxo_check = (utxo_snapshot or self.utxos).snapshot()
+        # coinbase must be first tx and may create new coins
+        if len(block.transactions) == 0:
+            return False
+        # basic tx validation
+        for tx in block.transactions:
+            # coinbase tx handling
+            if tx.inputs and tx.inputs[0].txid == "COINBASE":
+                # allow coinbase; skip normal checks
+                # ensure coinbase amount <= mining_reward + fees (we don't compute fees strictly here)
+                # add to utxo
+                for i, out in enumerate(tx.outputs):
+                    utxo_check.add_utxo(tx.txid, i, out)
+                continue
+            # Non-coinbase tx must validate against utxo_check
+            if not tx.verify(utxo_check):
                 return False
-            if current.previous_hash != prev.hash:
-                return False
-            # Check with block's own difficulty instead of global difficulty
-            if not current.hash.startswith('0' * current.difficulty):
-                return False
-
-            for tx in current.transactions:
-                if not tx.verify():
-                    return False
-
+            # apply tx to utxo_check
+            for inp in tx.inputs:
+                utxo_check.remove_utxo(inp.txid, inp.index)
+            for i, out in enumerate(tx.outputs):
+                utxo_check.add_utxo(tx.txid, i, out)
         return True
 
-    def add_peer(self, peer):
-        self.peers.append(peer)
-
-    def broadcast_new_block(self, block):
-        for peer in self.peers:
-            peer.receive_block(block)
-
-    def receive_block(self, block):
-        # Simple consensus: accept block if it's valid and the longest chain
-        if block.index > len(self.chain):
+    def add_block(self, block: Block):
+        # try to attach block: normal extension
+        if block.previous_hash == self.get_last_block().hash:
+            if not self.validate_block(block):
+                print("Invalid block")
+                return False
+            # apply transactions to UTXO set
+            for tx in block.transactions:
+                self.utxos.apply_transaction(tx)
             self.chain.append(block)
-            self.broadcast_new_block(block)
+            # remove mined txs from mempool
+            for tx in block.transactions:
+                if tx.txid in self.mempool.txs:
+                    self.mempool.remove_tx(tx.txid)
+            return True
+        else:
+            # possible reorg scenario: request chain from peer externally
+            print("Block doesn't extend chain. Need reorg handling (incoming chain).")
+            return False
 
+    def mine_pending(self, miner_address):
+        # create coinbase that collects fees + reward
+        pending = self.mempool.get_all()
+        total_fees = 0
+        for tx in pending:
+            # fees = inputs sum - outputs sum
+            ins_sum = 0
+            for inp in tx.inputs:
+                out = self.utxos.get_utxo(inp.txid, inp.index)
+                ins_sum += out.amount
+            outs_sum = sum(o.amount for o in tx.outputs)
+            total_fees += (ins_sum - outs_sum)
+        coinbase_out = TxOutput(self.mining_reward + total_fees, miner_address)
+        coinbase_tx = Transaction([TxInput("COINBASE", 0)], [coinbase_out])
+        coinbase_tx.txid = f"COINBASE_{int(time.time())}"
+        block = Block(self.get_last_block().index + 1, self.get_last_block().hash, [coinbase_tx] + pending, difficulty=self.difficulty)
+        block.mine()
+        # validate then apply
+        if not self.validate_block(block):
+            print("Mined block invalid")
+            return False
+        for tx in block.transactions:
+            self.utxos.apply_transaction(tx)
+        self.chain.append(block)
+        # clear mempool
+        self.mempool.txs.clear()
+        self.mempool.reserved_utxos.clear()
+        self.total_supply += self.mining_reward + total_fees
+        return block
+
+    def add_transaction(self, tx: Transaction):
+        # attempt to add to mempool
+        self.mempool.add_tx(tx, self.utxos)
+
+    def replace_chain(self, new_chain: List[Block]):
+        # naive: accept if longer and valid
+        if len(new_chain) <= len(self.chain):
+            return False
+        # validate full chain from genesis
+        utxo_temp = UTXOSet()
+        # apply genesis (assumes genesis in pos 0)
+        for blk in new_chain:
+            if not self.validate_block(blk, utxo_temp):
+                return False
+            # apply to utxo_temp (mutating)
+            for tx in blk.transactions:
+                utxo_temp.apply_transaction(tx)
+        # if we get here, adopt the new chain
+        self.chain = new_chain
+        self.utxos = utxo_temp
+        # drop conflicting mempool transactions that spend now-nonexistent UTXOs
+        for txid in list(self.mempool.txs.keys()):
+            tx = self.mempool.txs[txid]
+            try:
+                self.mempool.add_tx(tx, self.utxos)
+            except:
+                self.mempool.remove_tx(txid)
+        print("Chain replaced with longer valid chain.")
+        return True
+
+    def get_balance(self, address: str) -> int:
+        total = 0
+        for (txid, idx), out in self.utxos.utxos.items():
+            if out.recipient == address:
+                total += out.amount
+        return total
+
+# ---------------------------
+# Simple P2P Node (JSON)
+# ---------------------------
+class PeerNode:
+    def __init__(self, host: str, port: int, blockchain: Blockchain):
+        self.host = host
+        self.port = port
+        self.blockchain = blockchain
+        self.peers = []  # list of (host,port)
+        self.sock = None
+        self.running = False
+
+    def start(self):
+        self.running = True
+        t = threading.Thread(target=self._server_loop, daemon=True)
+        t.start()
+        print(f"Node listening on {self.host}:{self.port}")
+
+    def _server_loop(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((self.host, self.port))
+        s.listen(5)
+        self.sock = s
+        while self.running:
+            conn, addr = s.accept()
+            data = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            try:
+                msg = json.loads(data.decode())
+                self._handle_message(msg)
+            except Exception as e:
+                print("Failed to parse peer message:", e)
+            conn.close()
+
+    def _handle_message(self, msg):
+        typ = msg.get('type')
+        if typ == 'new_tx':
+            tx = Transaction.from_dict(msg['tx'])
+            try:
+                self.blockchain.add_transaction(tx)
+                print("Added tx from peer", tx.txid)
+            except Exception as e:
+                print("Rejected tx from peer:", e)
+        elif typ == 'new_block':
+            blk = Block.from_dict(msg['block'])
+            ok = self.blockchain.add_block(blk)
+            if ok:
+                self.broadcast({'type': 'new_block', 'block': blk.to_dict()})
+        elif typ == 'chain_request':
+            # send chain
+            chain_list = [b.to_dict() for b in self.blockchain.chain]
+            self.broadcast({'type': 'chain_response', 'chain': chain_list})
+        elif typ == 'chain_response':
+            chain_list = [Block.from_dict(bd) for bd in msg['chain']]
+            self.blockchain.replace_chain(chain_list)
+
+    def broadcast(self, message):
+        for (h, p) in list(self.peers):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((h, p))
+                s.send(json.dumps(message).encode())
+                s.close()
+            except Exception as e:
+                print("Failed to send to peer", (h,p), e)
+
+    def connect_peer(self, host, port):
+        self.peers.append((host, port))
+
+# ---------------------------
 # Wallet helpers
+# ---------------------------
 def generate_keys():
     sk = SigningKey.generate(curve=SECP256k1)
     vk = sk.get_verifying_key()
     return sk.to_string().hex(), vk.to_string().hex()
 
-class PeerNode:
-    def __init__(self, host, port, blockchain):
-        self.host = host  # local IP address
-        self.port = port  # local port
-        self.peers = []  # List of peer nodes
-        self.socket = None
-        self.blockchain = blockchain  # Reference to the blockchain
-
-    def start_server(self):
-        """Start listening for incoming connections (peers)."""
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(5)
-        print(f"Listening on {self.host}:{self.port}")
-
-        while True:
-            conn, addr = self.socket.accept()
-            print(f"Connection received from {addr}")
-            threading.Thread(target=self.handle_peer_connection, args=(conn, addr)).start()
-
-    def handle_peer_connection(self, conn, addr):
-        """Handle the connection from a peer node."""
-        data = conn.recv(1024).decode()
-        if data:
-            message = json.loads(data)
-            if message.get('type') == 'new_block':
-                self.receive_block(message['block'])
-        conn.close()
-
-    def send_to_peer(self, peer_ip, peer_port, message):
-        """Send a message to a specific peer."""
-        peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        peer_socket.connect((peer_ip, peer_port))
-        peer_socket.send(json.dumps(message).encode())
-        peer_socket.close()
-
-    def receive_block(self, block):
-        """Receive and validate a new block from a peer."""
-        print("Received block from peer: ", block)
-
-        # Simple validation: make sure the block has the correct previous hash
-        # (You can add more validation logic here like checking hash correctness, etc.)
-
-        # Add block to the local chain if valid
-        self.blockchain.receive_block(block)
-
-    def broadcast_new_block(self, block):
-        """Broadcast a newly mined block to all peers."""
-        message = {
-            'type': 'new_block',
-            'block': block
-        }
-        for peer in self.peers:
-            self.send_to_peer(peer['host'], peer['port'], message)
+def address_from_pubkey_hex(pubkey_hex):
+    return pubkey_to_address(pubkey_hex)
