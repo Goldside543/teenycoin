@@ -289,7 +289,8 @@ class Blockchain:
         self.utxos = UTXOSet()
         self.mempool = Mempool()
         self.peers = []
-        self.create_genesis_block()
+        if create_genesis:
+            self.create_genesis_block()
 
     def save_to_file(self, filename="teenycoin_chain.json"):
         data = {
