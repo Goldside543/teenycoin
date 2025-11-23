@@ -129,12 +129,12 @@ if __name__ == "__main__":
         else:
             pretty("No block mined (maybe invalid/mempool empty).")
 
-    def mine_hundred()
+    def mine_hundred():
          if not node:
             pretty("You need to create a node first!")
             return
-        miner_pubkey = input("Enter your PUBLIC KEY (hex) to receive the block reward: ").strip()
-        if not miner_pubkey:
+         miner_pubkey = input("Enter your PUBLIC KEY (hex) to receive the block reward: ").strip()
+         if not miner_pubkey:
             pretty("Public key required.")
             return
         for i in range(100):
