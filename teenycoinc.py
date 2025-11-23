@@ -436,7 +436,7 @@ class Blockchain:
 # ---------------------------
 # Simple P2P Node (JSON)
 # ---------------------------
-class PeerNode:
+class TeenyPeerNode:
     def __init__(self, host: str, port: int, blockchain: Blockchain):
         self.host = host
         self.port = port
