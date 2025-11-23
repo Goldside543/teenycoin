@@ -1,3 +1,4 @@
+import os
 import hashlib, json, time, threading, socket
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 import binascii
@@ -289,6 +290,33 @@ class Blockchain:
         self.mempool = Mempool()
         self.peers = []
         self.create_genesis_block()
+
+    def save_to_file(self, filename="teenycoin_chain.json"):
+        data = {
+            'chain': [blk.to_dict() for blk in self.chain],
+            'utxos': {f"{txid}_{idx}": out.to_dict() for (txid, idx), out in self.utxos.utxos.items()},
+            'total_supply': self.total_supply
+        }
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=4)
+        print(f"Blockchain saved to {filename}")
+
+    def load_from_file(self, filename="teenycoin_chain.json"):
+        if not os.path.exists(filename):
+            print(f"No blockchain file found at {filename}, starting fresh")
+            return
+        with open(filename, "r") as f:
+            data = json.load(f)
+        # load chain
+        self.chain = [Block.from_dict(bd) for bd in data['chain']]
+        # load UTXOs
+        self.utxos = UTXOSet()
+        for key, out_dict in data['utxos'].items():
+            txid, idx = key.rsplit("_", 1)
+            idx = int(idx)
+            self.utxos.add_utxo(txid, idx, TxOutput.from_dict(out_dict))
+        self.total_supply = data.get('total_supply', sum(o.amount for o in self.utxos.utxos.values()))
+        print(f"Blockchain loaded from {filename}")
 
     def create_genesis_block(self):
         # Create a coinbase tx that issues some initial coins to a genesis address
