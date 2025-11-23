@@ -280,7 +280,7 @@ class Mempool:
 # Blockchain (with UTXO, mempool, reorg)
 # ---------------------------
 class Blockchain:
-    def __init__(self, difficulty=3, mining_reward=50, max_supply=21000000):
+    def __init__(self, difficulty=5, mining_reward=1, max_supply=21000000):
         self.chain: List[Block] = []
         self.difficulty = difficulty
         self.mining_reward = mining_reward
