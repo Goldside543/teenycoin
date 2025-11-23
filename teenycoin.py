@@ -139,7 +139,7 @@ if __name__ == "__main__":
          if not miner_pubkey:
             pretty("Public key required.")
             return
-        for i in range(100):
+         for i in range(100):
             miner_addr = address_from_pubkey_hex(miner_pubkey)
             pretty(f"Mining to address: {miner_addr} ...")
             blk = blockchain.mine_pending(miner_addr)
