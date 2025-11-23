@@ -130,8 +130,24 @@ if __name__ == "__main__":
             pretty("No block mined (maybe invalid/mempool empty).")
 
     def mine_hundred()
+         if not node:
+            pretty("You need to create a node first!")
+            return
+        miner_pubkey = input("Enter your PUBLIC KEY (hex) to receive the block reward: ").strip()
+        if not miner_pubkey:
+            pretty("Public key required.")
+            return
         for i in range(100):
-            mine_once()
+            miner_addr = address_from_pubkey_hex(miner_pubkey)
+            pretty(f"Mining to address: {miner_addr} ...")
+            blk = blockchain.mine_pending(miner_addr)
+            if blk:
+                pretty(f"Mined block #{blk.index} {blk.hash}")
+                # broadcast block
+                if node:
+                    node.broadcast({'type': 'new_block', 'block': blk.to_dict()})
+            else:
+                pretty("No block mined (maybe invalid/mempool empty).")
 
     def view_balance():
         addr = input("Enter address to check balance (base58check): ").strip()
