@@ -1,4 +1,3 @@
-# toycoin.py
 import hashlib, json, time, threading, socket
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 import binascii
