@@ -18,7 +18,7 @@ if __name__ == "__main__":
         host = input("Enter host (default: 127.0.0.1): ") or "127.0.0.1"
         port = int(input("Enter port (default: 5000): ") or 5000)
 
-        node = PeerNode(host=host, port=port, blockchain=blockchain)
+        node = TeenyPeerNode(host=host, port=port, blockchain=blockchain)
         threading.Thread(target=node.start_server, daemon=True).start()
 
         print(f"Node started at {host}:{port}")
