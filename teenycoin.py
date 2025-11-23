@@ -12,6 +12,7 @@ def choose_host_port(default_host="127.0.0.1", default_port=5000):
 
 if __name__ == "__main__":
     blockchain = Blockchain()            # uses UTXO backend
+    blockchain.load_from_file()
     node = None
 
     def create_wallet():
@@ -128,6 +129,7 @@ if __name__ == "__main__":
                 node.broadcast({'type': 'new_block', 'block': blk.to_dict()})
         else:
             pretty("No block mined (maybe invalid/mempool empty).")
+        blockchain.save_to_file()
 
     def mine_hundred():
          if not node:
@@ -148,6 +150,7 @@ if __name__ == "__main__":
                     node.broadcast({'type': 'new_block', 'block': blk.to_dict()})
             else:
                 pretty("No block mined (maybe invalid/mempool empty).")
+            blockchain.save_to_file()
 
     def view_balance():
         addr = input("Enter address to check balance (base58check): ").strip()
