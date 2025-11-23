@@ -129,6 +129,10 @@ if __name__ == "__main__":
         else:
             pretty("No block mined (maybe invalid/mempool empty).")
 
+    def mine_hundred()
+        for i in range(100):
+            mine_once()
+
     def view_balance():
         addr = input("Enter address to check balance (base58check): ").strip()
         if not addr:
@@ -144,8 +148,9 @@ if __name__ == "__main__":
         print("3) Connect to Peer")
         print("4) Send Coins")
         print("5) Mine One Block")
-        print("6) View Balance")
-        print("7) Quit")
+        print("6) Mine 100 Blocks")
+        print("7) View Balance")
+        print("8) Quit")
         print("--------------------")
 
     # CLI loop
@@ -163,8 +168,10 @@ if __name__ == "__main__":
         elif choice == "5":
             mine_once()
         elif choice == "6":
-            view_balance()
+            mine_hundred()
         elif choice == "7":
+            view_balance()
+        elif choice == "8":
             pretty("Bye.")
             break
         else:
