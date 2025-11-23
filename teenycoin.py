@@ -11,7 +11,7 @@ def choose_host_port(default_host="127.0.0.1", default_port=5000):
     return host, int(port)
 
 if __name__ == "__main__":
-    blockchain = Blockchain()            # uses UTXO backend
+    blockchain = Blockchain(create_genesis=False)            # uses UTXO backend
     blockchain.load_from_file()
     node = None
 
