@@ -208,7 +208,7 @@ class UTXOSet:
 # Block
 # ---------------------------
 class Block:
-    def __init__(self, index: int, prev_hash: str, transactions: List[Transaction], difficulty=6, timestamp=None, nonce=0):
+    def __init__(self, index: int, prev_hash: str, transactions: List[Transaction], difficulty=9, timestamp=None, nonce=0):
         self.index = index
         self.previous_hash = prev_hash
         self.transactions = transactions
@@ -317,7 +317,7 @@ class Mempool:
 # Blockchain (with UTXO, mempool, reorg)
 # ---------------------------
 class Blockchain:
-    def __init__(self, difficulty=6, mining_reward=1, max_supply=10000000, create_genesis=True):
+    def __init__(self, difficulty=9, mining_reward=1, max_supply=10000000, create_genesis=True):
         self.chain: List[Block] = []
         self.difficulty = difficulty
         self.mining_reward = mining_reward
