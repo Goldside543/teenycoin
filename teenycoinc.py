@@ -4,6 +4,7 @@ from ecdsa import SigningKey, VerifyingKey, SECP256k1
 import binascii
 from typing import List, Dict, Tuple
 from multiprocessing import Process, Value, Event, cpu_count
+from ctypes import c_char
 
 # ---------------------------
 # Utility: base58check-like
@@ -230,7 +231,8 @@ class Block:
         prefix = '0' * self.difficulty
         nprocs = cpu_count()
         stop_event = Event()
-        result_hash = Value('c', b'0'*64)
+        result_hash = Value(c_char * 64)  # allocate 64-character buffer
+        result_hash.value = b'0' * 64
         result_nonce = Value('i', 0)
         hashes_tried = Value('i', 0)
 
