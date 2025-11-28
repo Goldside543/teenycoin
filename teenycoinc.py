@@ -3,6 +3,7 @@ import hashlib, json, time, threading, socket
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 import binascii
 from typing import List, Dict, Tuple
+from multiprocessing import Process, Value, Event, cpu_count
 
 # ---------------------------
 # Utility: base58check-like
@@ -211,21 +212,46 @@ class Block:
         }
         return hashlib.sha256(json.dumps(block_data, sort_keys=True).encode()).hexdigest()
 
+    def mine_block_worker(start_nonce, step, prefix, stop_event, result_hash, result_nonce, hashes_tried):
+        nonce = start_nonce
+        local_count = 0
+        while not stop_event.is_set():
+            h = hashlib.sha256(str(nonce).encode()).hexdigest()
+            local_count += 1
+            if h.startswith(prefix):
+                result_hash.value = h.encode()
+                result_nonce.value = nonce
+                stop_event.set()
+                break
+            nonce += step
+        hashes_tried.value += local_count
+
     def mine(self):
         prefix = '0' * self.difficulty
-        start_time = time.time()
-        hashes_tried = 0
+        nprocs = cpu_count()
+        stop_event = Event()
+        result_hash = Value('c', b'0'*64)
+        result_nonce = Value('i', 0)
+        hashes_tried = Value('i', 0)
 
-        while not self.hash.startswith(prefix):
-            self.nonce += 1
-            self.hash = self.compute_hash()
-            hashes_tried += 1
+        start_time = time.time()
+        procs = []
+        for i in range(nprocs):
+            p = Process(target=mine_block_worker, args=(i, nprocs, prefix, stop_event, result_hash, result_nonce, hashes_tried))
+            p.start()
+            procs.append(p)
+
+        for p in procs:
+            p.join()
 
         end_time = time.time()
         elapsed = end_time - start_time
-        mh_s = (hashes_tried / elapsed) / 1_000_000
+        mh_s = (hashes_tried.value / elapsed) / 1_000_000
 
+        self.nonce = result_nonce.value
+        self.hash = result_hash.value.decode()
         print(f"Mined block {self.index} {self.hash} nonce={self.nonce} MH/s={mh_s:.4f}")
+
 
     def to_dict(self):
         return {
