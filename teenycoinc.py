@@ -397,8 +397,8 @@ class Blockchain:
 
     def mine_pending(self, miner_address):
         if self.total_supply + self.mining_reward > self.max_supply:
-        print("Mining would exceed max supply, halting.")
-        return None
+            print("Mining would exceed max supply, halting.")
+            return None
         
         # create coinbase that collects fees + reward
         pending = self.mempool.get_all()
