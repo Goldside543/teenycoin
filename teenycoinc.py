@@ -11,6 +11,20 @@ from ctypes import c_char
 # ---------------------------
 ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
+def mine_block_worker(start_nonce, step, prefix, stop_event, result_hash, result_nonce, hashes_tried):
+    nonce = start_nonce
+    local_count = 0
+    while not stop_event.is_set():
+        h = hashlib.sha256(str(nonce).encode()).hexdigest()
+        local_count += 1
+        if h.startswith(prefix):
+            result_hash.value = h.encode()
+            result_nonce.value = nonce
+            stop_event.set()
+            break
+        nonce += step
+    hashes_tried.value += local_count
+
 def sha256(b: bytes) -> bytes:
     return hashlib.sha256(b).digest()
 
@@ -212,20 +226,6 @@ class Block:
             'nonce': self.nonce
         }
         return hashlib.sha256(json.dumps(block_data, sort_keys=True).encode()).hexdigest()
-
-    def mine_block_worker(start_nonce, step, prefix, stop_event, result_hash, result_nonce, hashes_tried):
-        nonce = start_nonce
-        local_count = 0
-        while not stop_event.is_set():
-            h = hashlib.sha256(str(nonce).encode()).hexdigest()
-            local_count += 1
-            if h.startswith(prefix):
-                result_hash.value = h.encode()
-                result_nonce.value = nonce
-                stop_event.set()
-                break
-            nonce += step
-        hashes_tried.value += local_count
 
     def mine(self):
         prefix = '0' * self.difficulty
