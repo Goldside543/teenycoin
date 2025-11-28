@@ -211,12 +211,21 @@ class Block:
         }
         return hashlib.sha256(json.dumps(block_data, sort_keys=True).encode()).hexdigest()
 
-    def mine(self):
-        prefix = '0' * self.difficulty
-        while not self.hash.startswith(prefix):
-            self.nonce += 1
-            self.hash = self.compute_hash()
-        print(f"Mined block {self.index} {self.hash} nonce={self.nonce}")
+def mine(self):
+    prefix = '0' * self.difficulty
+    start_time = time.time()
+    hashes_tried = 0
+
+    while not self.hash.startswith(prefix):
+        self.nonce += 1
+        self.hash = self.compute_hash()
+        hashes_tried += 1
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    mh_s = (hashes_tried / elapsed) / 1_000_000
+
+    print(f"Mined block {self.index} {self.hash} nonce={self.nonce} MH/s={mh_s:.4f}")
 
     def to_dict(self):
         return {
